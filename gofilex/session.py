@@ -13,9 +13,11 @@ import re
 import shutil
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from .ratelimit import DEFAULT_INTERVALS, FLOOR_INTERVALS
 
 APP_DIR = Path.home() / ".gofilex"
 LEGACY_APP_DIRS = (Path.home() / ".onefilex",)
@@ -45,10 +47,11 @@ SHARE_RE = re.compile(
     r"(?:https?://)?(?:www\.)?gofile\.io/(?:d|w)/([A-Za-z0-9]+)",
     re.IGNORECASE,
 )
+CONTENT_ID_RE = re.compile(r"[A-Za-z0-9-]{6,64}")
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_content_id(value: str) -> str:
@@ -56,7 +59,7 @@ def parse_content_id(value: str) -> str:
     match = SHARE_RE.search(value)
     if match:
         return match.group(1)
-    if re.fullmatch(r"[A-Za-z0-9-]{6,64}", value):
+    if CONTENT_ID_RE.fullmatch(value):
         return value
     raise ValueError(f"not a GoFile share URL or content id: {value!r}")
 
@@ -70,9 +73,9 @@ def remember_last_session(name: str) -> None:
     payload = json.dumps({"session": name, "updated_at": now_iso()})
     tmp = ACTIVE_PATH.with_suffix(".tmp")
     tmp.write_text(payload + "\n", encoding="utf-8")
-    os.replace(tmp, ACTIVE_PATH)
+    tmp.replace(ACTIVE_PATH)
     try:
-        os.chmod(ACTIVE_PATH, 0o600)
+        ACTIVE_PATH.chmod(0o600)
     except OSError:
         pass
 
@@ -95,8 +98,8 @@ class AccountRecord:
     email: str = ""
     tier: str = ""
     root_folder: str = ""
-    stats_current: dict = field(default_factory=dict)
-    ip_traffic: dict | int | None = None
+    stats_current: dict[str, Any] = field(default_factory=dict)
+    ip_traffic: dict[str, Any] | int | None = None
     synced_at: str = ""
 
 
@@ -111,10 +114,9 @@ class WordlistRecord:
     exhausted: bool = False
 
 
-def _wordlist_from_dict(item: dict) -> WordlistRecord:
-    return WordlistRecord(
-        **{k: v for k, v in item.items() if k in WordlistRecord.__dataclass_fields__}
-    )
+def _wordlist_from_dict(item: dict[str, Any]) -> WordlistRecord:
+    allowed = WordlistRecord.__dataclass_fields__
+    return WordlistRecord(**{k: v for k, v in item.items() if k in allowed})
 
 
 def _clone_wordlist_paths(records: list[WordlistRecord]) -> list[WordlistRecord]:
@@ -128,7 +130,7 @@ class TargetRecord:
     wordlists: list[WordlistRecord] = field(default_factory=list)
     found_password: str | None = None
     found_at: str | None = None
-    listing: dict | None = None
+    listing: dict[str, Any] | None = None
     engine_state: str = "idle"
     last_password: str | None = None
     last_wordlist: str | None = None
@@ -139,7 +141,7 @@ class TargetRecord:
             self.target_url = share_url(self.content_id)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "TargetRecord":
+    def from_dict(cls, data: dict[str, Any]) -> TargetRecord:
         wordlists = [_wordlist_from_dict(item) for item in data.get("wordlists") or []]
         fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         fields["wordlists"] = wordlists
@@ -157,7 +159,7 @@ class Session:
     wordlists: list[WordlistRecord] = field(default_factory=list)
     found_password: str | None = None
     found_at: str | None = None
-    listing: dict | None = None
+    listing: dict[str, Any] | None = None
     download_dir: str = ""
     contents_interval: float = 3.0
     engine_state: str = "idle"
@@ -216,13 +218,12 @@ class Session:
         job.listing = self.listing
         job.engine_state = self.engine_state
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         self._push_active()
-        data = asdict(self)
-        return data
+        return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Session":
+    def from_dict(cls, data: dict[str, Any]) -> Session:
         account = data.get("account") or {}
         wordlists = [_wordlist_from_dict(item) for item in data.get("wordlists") or []]
         raw_targets = data.get("targets") or {}
@@ -260,27 +261,32 @@ class Session:
         self._push_active()
         self.updated_at = now_iso()
         payload = json.dumps(self.to_dict(), indent=2, sort_keys=False)
-        fd, tmp = tempfile.mkstemp(prefix=f".{self.name}.", suffix=".json", dir=SESSION_DIR)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self.name}.",
+            suffix=".json",
+            dir=SESSION_DIR,
+        )
+        tmp_path = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(payload)
                 handle.write("\n")
-            os.replace(tmp, self.path)
-        except Exception:
+            tmp_path.replace(self.path)
+        except OSError:
             try:
-                os.unlink(tmp)
+                tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
             raise
         try:
-            os.chmod(self.path, 0o600)
+            self.path.chmod(0o600)
         except OSError:
             pass
         remember_last_session(self.name)
         return self.path
 
     @classmethod
-    def load(cls, name: str) -> "Session":
+    def load(cls, name: str) -> Session:
         path = SESSION_DIR / f"{name}.json"
         with path.open(encoding="utf-8") as handle:
             data = json.load(handle)
@@ -295,7 +301,7 @@ class Session:
         return session
 
     @classmethod
-    def load_or_create(cls, name: str) -> "Session":
+    def load_or_create(cls, name: str) -> Session:
         path = SESSION_DIR / f"{name}.json"
         if path.exists():
             return cls.load(name)
@@ -311,8 +317,6 @@ class Session:
         return sorted(p.stem for p in SESSION_DIR.glob("*.json") if not p.name.startswith("."))
 
     def clamp_rate(self) -> None:
-        from .ratelimit import DEFAULT_INTERVALS, FLOOR_INTERVALS
-
         if self.contents_interval < FLOOR_INTERVALS["contents"]:
             self.contents_interval = DEFAULT_INTERVALS["contents"]
         # Previous cautious default was 15–45s; speed those sessions back up.

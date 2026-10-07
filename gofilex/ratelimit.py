@@ -16,13 +16,14 @@ and briefly raise the cruise interval. Pause only after several consecutive
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-
+from typing import Any
 
 # Documented: GET /servers must not be called more than once every 10s.
 # The earlier IP block came from a short burst, not from ~3s spacing.
 GLOBAL_MIN_INTERVAL = 1.0
-DEFAULT_INTERVALS = {
+DEFAULT_INTERVALS: dict[str, float] = {
     "contents": 3.0,
     "accounts": 12.0,
     "accounts_getid": 8.0,
@@ -31,7 +32,7 @@ DEFAULT_INTERVALS = {
     "wt_script": 86400.0,
     "download": 1.0,
 }
-FLOOR_INTERVALS = {
+FLOOR_INTERVALS: dict[str, float] = {
     "contents": 1.5,
     "accounts": 6.0,
     "accounts_getid": 5.0,
@@ -48,6 +49,9 @@ NETWORK_BACKOFF = 30.0
 PAUSE_ON_NETWORK_ERROR = True
 MAX_CONTENTS_INTERVAL = 20.0
 OK_STREAK_TO_RELAX = 8
+DEFAULT_UNKNOWN_INTERVAL = 5.0
+
+SleepFn = Callable[[float], Awaitable[None]]
 
 
 @dataclass
@@ -81,7 +85,7 @@ class RateLimiter:
     def endpoint(self, name: str) -> EndpointStats:
         stats = self.endpoints.get(name)
         if stats is None:
-            interval = DEFAULT_INTERVALS.get(name, 5.0)
+            interval = DEFAULT_INTERVALS.get(name, DEFAULT_UNKNOWN_INTERVAL)
             if name == "contents":
                 interval = self.contents_interval
             stats = EndpointStats(name=name, min_interval=interval)
@@ -108,7 +112,7 @@ class RateLimiter:
         now = now if now is not None else time.time()
         return max(0.0, self.next_allowed_at(name, now) - now)
 
-    async def acquire(self, name: str, sleep) -> None:
+    async def acquire(self, name: str, sleep: SleepFn) -> None:
         """Block via the provided async sleep until this endpoint may fire."""
         while True:
             wait = self.wait_seconds(name)
@@ -155,9 +159,10 @@ class RateLimiter:
                     min(MAX_CONTENTS_INTERVAL, self.contents_interval * 2.0)
                 )
             else:
+                floor = FLOOR_INTERVALS.get(name, DEFAULT_UNKNOWN_INTERVAL)
                 stats.min_interval = min(
                     MAX_CONTENTS_INTERVAL,
-                    max(stats.min_interval * 2.0, FLOOR_INTERVALS.get(name, 5.0)),
+                    max(stats.min_interval * 2.0, floor),
                 )
             if stats.consecutive_429 >= PAUSE_AFTER_CONSECUTIVE_429:
                 self.paused = True
@@ -196,7 +201,7 @@ class RateLimiter:
         stats.consecutive_429 = 0
         stats.consecutive_ok = 0
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> dict[str, Any]:
         now = time.time()
         return {
             "global_min_interval": self.global_min_interval,

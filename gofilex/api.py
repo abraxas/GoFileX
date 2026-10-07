@@ -17,7 +17,9 @@ Without that header the listing endpoint answers error-notPremium.
 
 from __future__ import annotations
 
+import asyncio
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,11 +30,18 @@ from .ratelimit import RateLimiter
 from .wt import DEFAULT_SALT, WT_SCRIPT_URL, extract_salts_from_obf, generate_wt
 
 API_BASE = "https://api.gofile.io"
+ORIGIN = "https://gofile.io"
+REFERER = "https://gofile.io/"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 LANGUAGE = "en-US"
+HTTP_TIMEOUT = httpx.Timeout(20.0, connect=8.0, pool=8.0)
+DOWNLOAD_CHUNK = 64 * 1024
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f]")
+
+ProgressFn = Callable[[int, int], None]
 
 
 @dataclass
@@ -108,17 +117,17 @@ def _retry_after(response: httpx.Response) -> float | None:
 
 
 class GofileClient:
-    def __init__(self, token: str = "", limiter: RateLimiter | None = None):
+    def __init__(self, token: str = "", limiter: RateLimiter | None = None) -> None:
         self.token = token
         self.salt = DEFAULT_SALT
         self.limiter = limiter or RateLimiter()
         self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0, connect=8.0, pool=8.0),
+            timeout=HTTP_TIMEOUT,
             headers={
                 "User-Agent": USER_AGENT,
                 "Accept": "application/json",
-                "Origin": "https://gofile.io",
-                "Referer": "https://gofile.io/",
+                "Origin": ORIGIN,
+                "Referer": REFERER,
                 "X-BL": LANGUAGE,
             },
             follow_redirects=True,
@@ -146,8 +155,8 @@ class GofileClient:
         *,
         endpoint: str,
         listing: bool = False,
-        params: dict | None = None,
-        json: dict | None = None,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
         window_offset: int = 0,
     ) -> ApiResponse:
         await self.limiter.acquire(endpoint, self._sleep)
@@ -202,8 +211,6 @@ class GofileClient:
         return result
 
     async def _sleep(self, seconds: float) -> None:
-        import asyncio
-
         await asyncio.sleep(seconds)
 
     async def refresh_salt(self) -> str:
@@ -266,7 +273,7 @@ class GofileClient:
             window_offset=window_offset,
         )
         data = base.data
-        listing = ListingResult(
+        return ListingResult(
             endpoint=base.endpoint,
             http_status=base.http_status,
             api_status=base.api_status,
@@ -278,16 +285,20 @@ class GofileClient:
             password_protected=bool(data.get("password")),
             password_status=data.get("passwordStatus"),
         )
-        return listing
 
-    async def download_file(self, url: str, dest: Path, on_progress=None) -> Path:
+    async def download_file(
+        self,
+        url: str,
+        dest: Path,
+        on_progress: ProgressFn | None = None,
+    ) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
         headers = {
             "User-Agent": USER_AGENT,
             "Authorization": f"Bearer {self.token}",
             "Cookie": f"accountToken={self.token}",
-            "Referer": "https://gofile.io/",
-            "Origin": "https://gofile.io",
+            "Referer": REFERER,
+            "Origin": ORIGIN,
         }
         await self.limiter.acquire("download", self._sleep)
         async with self._http.stream("GET", url, headers=headers) as response:
@@ -301,7 +312,7 @@ class GofileClient:
             written = 0
             tmp = dest.with_suffix(dest.suffix + ".part")
             with tmp.open("wb") as handle:
-                async for chunk in response.aiter_bytes(1024 * 64):
+                async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK):
                     handle.write(chunk)
                     written += len(chunk)
                     if on_progress:
@@ -312,5 +323,5 @@ class GofileClient:
 
 def sanitize_filename(name: str) -> str:
     name = name.replace("/", "_").replace("\\", "_")
-    name = re.sub(r"[\x00-\x1f]", "", name).strip()
+    name = CONTROL_CHAR_RE.sub("", name).strip()
     return name or "download"

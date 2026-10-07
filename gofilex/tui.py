@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +18,9 @@ from .api import GofileClient
 from .engine import Engine
 from .ratelimit import RateLimiter
 from .session import SESSION_DIR, Session
-from .wordlist import MIN_PASSWORD_LEN, MAX_PASSWORD_LEN, WORDLIST_ROOT, bundled_wordlists
+from .wordlist import MAX_PASSWORD_LEN, MIN_PASSWORD_LEN, WORDLIST_ROOT, bundled_wordlists
+
+CmdHandler = Callable[[list[str]], Awaitable[None]]
 
 AUTHOR = "@abraxas_null"
 HANDLE = "@abraxas_null"
@@ -336,11 +339,7 @@ class GoFileXApp(App):
         limiter = self.limiter
         snap = limiter.snapshot()
         contents = snap["endpoints"].get("contents") or {}
-        running = "RUN" if self.engine.state.running and not self.engine.state.paused else (
-            "PAUSE" if self.engine.state.paused or limiter.paused else (
-                "FOUND" if session.found_password else "IDLE"
-            )
-        )
+        running = self._run_label()
         title = (
             f" GoFileX {__version__}  ::  {HANDLE}  ::  {session.name}  "
             f"{session.content_id}  {account.tier or 'no-acct'}  [{running}]  {clock()} "
@@ -372,6 +371,15 @@ class GoFileXApp(App):
 
         self.query_one("#lists", SidePanel).update(self._lists_text())
         self.query_one("#acct", SidePanel).update(self._acct_text())
+
+    def _run_label(self) -> str:
+        if self.engine.state.running and not self.engine.state.paused:
+            return "RUN"
+        if self.engine.state.paused or self.limiter.paused:
+            return "PAUSE"
+        if self.session.found_password:
+            return "FOUND"
+        return "IDLE"
 
     def _lists_text(self) -> str:
         lines = ["[bold #00ffff] WORDLISTS[/]", ""]
@@ -415,7 +423,10 @@ class GoFileXApp(App):
             f" token {escape(short(a.token, 10)+('…' if a.token else ''))}",
             "",
             f" GET /contents",
-            f"   req {contents.get('requests', 0)}  ok {contents.get('ok', 0)}  429 {contents.get('rate_limits', 0)}",
+            (
+                f"   req {contents.get('requests', 0)}  ok {contents.get('ok', 0)}  "
+                f"429 {contents.get('rate_limits', 0)}"
+            ),
             f"   interval {self.limiter.contents_interval:.1f}s",
             f"   next {contents.get('next_s', 0):.1f}s  cd {contents.get('cooldown_s', 0):.0f}s",
             f" GET /accounts",
@@ -478,7 +489,7 @@ class GoFileXApp(App):
             return
         cmd = parts[0].lower().lstrip("/")
         args = parts[1:]
-        handler = {
+        handlers: dict[str, CmdHandler] = {
             "help": self._cmd_help,
             "?": self._cmd_help,
             "quit": self._cmd_quit,
@@ -505,7 +516,8 @@ class GoFileXApp(App):
             "stats": self._cmd_stats,
             "dl": self._cmd_dl,
             "download": self._cmd_dl,
-        }.get(cmd)
+        }
+        handler = handlers.get(cmd)
         if handler is None:
             self._say("err", f"unknown command /{cmd}  —  /help")
             return
@@ -549,7 +561,12 @@ class GoFileXApp(App):
                 if not item.exhausted:
                     rec = item
                     break
-            wl = f"{Path(rec.path).name}:{rec.line}" if rec else ("done" if job.wordlists else "no-lists")
+            if rec:
+                wl = f"{Path(rec.path).name}:{rec.line}"
+            elif job.wordlists:
+                wl = "done"
+            else:
+                wl = "no-lists"
             found = f"  FOUND {job.found_password}" if job.found_password else ""
             self._say("sys", f"{mark} {tid}  {wl}  {job.engine_state}{found}")
 
@@ -582,16 +599,17 @@ class GoFileXApp(App):
             self._say("ok", f"switched to {job.target_url}  already unlocked")
         else:
             n = len(job.wordlists)
-            self._say(
-                "ok",
-                f"switched to {job.target_url}  "
-                f"{'new job, copied ' + str(n) + ' wordlist path(s), progress 0' if n else 'new job — /wl all'}",
-            )
+            if n:
+                extra = f"new job, copied {n} wordlist path(s), progress 0"
+            else:
+                extra = "new job — /wl all"
+            self._say("ok", f"switched to {job.target_url}  {extra}")
 
     async def _cmd_token(self, args: list[str]) -> None:
         if not args:
             tok = self.session.account.token
-            self._say("sys", f"token {tok[:8]+'…' if tok else '(none)'}")
+            shown = f"{tok[:8]}…" if tok else "(none)"
+            self._say("sys", f"token {shown}")
             return
         token = args[0].strip()
         self.session.account.token = token
@@ -648,7 +666,8 @@ class GoFileXApp(App):
                     added += 1
                 self._say("ok", f"queued {path.name}")
             self.session.save()
-            self._say("sys", f"imported {added} new list(s), queue now {len(self.session.wordlists)} — custom first")
+            n_lists = len(self.session.wordlists)
+            self._say("sys", f"imported {added} new list(s), queue now {n_lists} — custom first")
             return
         if sub in {"drop", "rm", "remove"}:
             if len(args) < 2 or not args[1].isdigit():
@@ -712,5 +731,3 @@ class GoFileXApp(App):
     async def _cmd_dl(self, args: list[str]) -> None:
         dest = args[0] if args else None
         await self.engine.download_all(dest)
-
-

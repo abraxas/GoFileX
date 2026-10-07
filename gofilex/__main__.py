@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -33,8 +34,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="wordlist file to queue (repeatable). Same as /wl add",
     )
-    parser.add_argument("--token", default=None, help="existing GoFile API token (Premium for GET /contents)")
-    parser.add_argument("--interval", type=float, default=None, help="seconds between GET /contents (floor 1.5, default 3)")
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="existing GoFile API token (Premium for GET /contents)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=None,
+        help="seconds between GET /contents (floor 1.5, default 3)",
+    )
     parser.add_argument(
         "--probe",
         action="store_true",
@@ -74,8 +84,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _probe(app: GoFileXApp) -> int:
-    import asyncio
-
     logs: list[str] = []
 
     def log(kind: str, message: str) -> None:
@@ -104,4 +112,4 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        raise SystemExit(130)
+        raise SystemExit(130) from None

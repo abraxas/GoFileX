@@ -1,31 +1,31 @@
+from __future__ import annotations
+
 import hashlib
 import time
 from pathlib import Path
+from typing import Any
 
 from gofilex.api import ListingResult
 from gofilex.ratelimit import FLOOR_INTERVALS, RateLimiter
-from gofilex.session import parse_content_id
-from gofilex.wordlist import WordlistQueue, sha256_hex, usable_password
+from gofilex.session import Session, WordlistRecord, parse_content_id
+from gofilex.wordlist import WordlistQueue, bundled_wordlists, sha256_hex, usable_password
 from gofilex.wt import DEFAULT_SALT, generate_wt, time_window
 
 
-def test_bundled_wordlists_scans_local_dir():
-    from gofilex.wordlist import bundled_wordlists
-
+def test_bundled_wordlists_scans_local_dir() -> None:
     # Wordlists are not shipped in the public tree. If the operator
     # dropped files locally, every returned path must exist.
     paths = bundled_wordlists()
     assert all(p.is_file() for p in paths)
 
 
-def test_parse_target():
+def test_parse_target() -> None:
     assert parse_content_id("https://gofile.io/d/Example01") == "Example01"
     assert parse_content_id("Example01") == "Example01"
 
 
-def test_session_multi_target_resume(tmp_path, monkeypatch):
+def test_session_multi_target_resume(tmp_path: Path, monkeypatch: Any) -> None:
     from gofilex import session as session_mod
-    from gofilex.session import Session
 
     monkeypatch.setattr(session_mod, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(session_mod, "APP_DIR", tmp_path)
@@ -34,7 +34,7 @@ def test_session_multi_target_resume(tmp_path, monkeypatch):
     s = Session(name="hunt")
     s.set_target("ShareAAAA")
     s.add_wordlist(tmp_path / "a.txt")
-    (tmp_path / "a.txt").write_text("alpha\nbeta\n")
+    (tmp_path / "a.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     s.wordlists[0].line = 12
     s.wordlists[0].tried = 10
     s.save()
@@ -58,14 +58,14 @@ def test_session_multi_target_resume(tmp_path, monkeypatch):
     assert reloaded.targets["ShareAAAA"].wordlists[0].line == 12
 
 
-def test_password_hash_and_filter():
+def test_password_hash_and_filter() -> None:
     assert sha256_hex("test") == hashlib.sha256(b"test").hexdigest()
     assert usable_password("abcd")
     assert not usable_password("ab")
     assert not usable_password("x" * 101)
 
 
-def test_wt_formula():
+def test_wt_formula() -> None:
     ua = "Mozilla/5.0"
     token = "abc"
     now = 124146 * 14400
@@ -74,7 +74,7 @@ def test_wt_formula():
     assert got == hashlib.sha256(raw.encode()).hexdigest()
 
 
-def test_rate_limiter_floor_and_429():
+def test_rate_limiter_floor_and_429() -> None:
     limiter = RateLimiter()
     applied = limiter.set_contents_interval(0.1)
     assert applied >= FLOOR_INTERVALS["contents"]
@@ -92,7 +92,7 @@ def test_rate_limiter_floor_and_429():
     assert stats.consecutive_429 == 3
 
 
-def test_network_error_pauses():
+def test_network_error_pauses() -> None:
     limiter = RateLimiter()
     limiter.mark_request("contents")
     limiter.observe("contents", api_status="error-network")
@@ -100,7 +100,7 @@ def test_network_error_pauses():
     assert limiter.wait_seconds("contents") > 0
 
 
-def test_listing_gates():
+def test_listing_gates() -> None:
     wrong = ListingResult(
         endpoint="contents",
         http_status=200,
@@ -124,10 +124,9 @@ def test_listing_gates():
     assert hit.password_ok
 
 
-def test_wordlist_resume(tmp_path: Path):
+def test_wordlist_resume(tmp_path: Path) -> None:
     path = tmp_path / "wl.txt"
     path.write_text("a\nabcd\nsecret\n", encoding="utf-8")
-    from gofilex.session import WordlistRecord
 
     rec = WordlistRecord(path=str(path), line=0)
     queue = WordlistQueue([rec])

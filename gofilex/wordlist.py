@@ -12,6 +12,7 @@ from .session import WordlistRecord
 # Trying outside that range wastes rate-limited listing calls.
 MIN_PASSWORD_LEN = 4
 MAX_PASSWORD_LEN = 100
+LINE_ENCODINGS = ("utf-8", "latin-1")
 
 
 def sha256_hex(password: str) -> str:
@@ -20,14 +21,14 @@ def sha256_hex(password: str) -> str:
 
 def count_lines(path: str | Path) -> int:
     total = 0
-    with open(path, "rb") as handle:
+    with Path(path).open("rb") as handle:
         for _ in handle:
             total += 1
     return total
 
 
 def decode_line(raw: bytes) -> str:
-    for encoding in ("utf-8", "latin-1"):
+    for encoding in LINE_ENCODINGS:
         try:
             return raw.decode(encoding).rstrip("\r\n")
         except UnicodeDecodeError:
@@ -53,7 +54,7 @@ class Candidate:
 
 
 class WordlistQueue:
-    def __init__(self, records: list[WordlistRecord]):
+    def __init__(self, records: list[WordlistRecord]) -> None:
         self.records = records
 
     def ensure_totals(self) -> None:
@@ -101,13 +102,14 @@ class WordlistQueue:
                     name = path.name
                     if not usable_password(password):
                         record.skipped += 1
+                        reason = "empty" if not password else f"len={len(password)} (need 4-100)"
                         return Candidate(
                             password=password,
                             digest="",
                             wordlist=name,
                             line=record.line,
                             skipped=True,
-                            skip_reason="empty" if not password else f"len={len(password)} (need 4-100)",
+                            skip_reason=reason,
                         )
                     return Candidate(
                         password=password,
@@ -122,7 +124,7 @@ class WordlistQueue:
 WORDLIST_ROOT = Path(__file__).resolve().parent.parent / "wordlists"
 
 # Custom / high-signal first, then small public tops, then larger breach lists.
-BUNDLED_ORDER = [
+BUNDLED_ORDER: list[str] = [
     "custom/tesox2-clues.txt",
     "public/nordpass-2025-top200.txt",
     "public/2025-199_most_used_passwords.txt",

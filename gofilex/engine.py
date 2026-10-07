@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+
+import httpx
 
 from .api import GofileClient, ListingResult, sanitize_filename
-from .session import AccountRecord, Session, now_iso
-from .wordlist import Candidate, WordlistQueue, sha256_hex
+from .session import Session, now_iso
+from .wordlist import Candidate, WordlistQueue, sha256_hex, usable_password
 
 OPERATOR = "@abraxas_null"
+SAVE_EVERY_ATTEMPTS = 1
 
 LogFn = Callable[[str, str], None]  # (kind, message)
 
@@ -28,13 +31,13 @@ class EngineState:
 
 
 class Engine:
-    def __init__(self, session: Session, client: GofileClient, log: LogFn):
+    def __init__(self, session: Session, client: GofileClient, log: LogFn) -> None:
         self.session = session
         self.client = client
         self.log = log
         self.state = EngineState()
-        self._task: asyncio.Task | None = None
-        self._save_every = 1
+        self._task: asyncio.Task[None] | None = None
+        self._save_every = SAVE_EVERY_ATTEMPTS
         self._attempts_since_save = 0
         if session.found_password:
             self.state.found = session.found_password
@@ -51,7 +54,10 @@ class Engine:
         self._emit("sys", "no stored token — POST /accounts (guest, documented)")
         created = await self.client.create_guest()
         if not created.ok:
-            self._emit("err", f"guest create failed: {created.api_status} HTTP {created.http_status}")
+            self._emit(
+                "err",
+                f"guest create failed: {created.api_status} HTTP {created.http_status}",
+            )
             return False
         account.id = str(created.data.get("id") or "")
         account.token = str(created.data.get("token") or "")
@@ -100,7 +106,10 @@ class Engine:
         """One GET /contents. Never loops. Counts toward the listing budget."""
         token = self.session.account.token
         if not token:
-            self._emit("err", "heartbeat skipped — no token. /guest or /token first (that is a separate call).")
+            self._emit(
+                "err",
+                "heartbeat skipped — no token. /guest or /token first (that is a separate call).",
+            )
             return None
         if not self.session.content_id:
             self._emit("err", "heartbeat skipped — no target. /target <gofile url or id> first.")
@@ -114,10 +123,11 @@ class Engine:
                 "The limiter already has a live request on the clock; sending now would stack calls.",
             )
             return None
+        interval = self.client.limiter.contents_interval
         self._emit(
             "sys",
             f"heartbeat  GET /contents/{self.session.content_id}  "
-            f"(one shot, counts as a listing request, next slot +{self.client.limiter.contents_interval:.0f}s)",
+            f"(one shot, counts as a listing request, next slot +{interval:.0f}s)",
         )
         listing = await self.client.get_contents(self.session.content_id)
         self.state.last_listing = listing
@@ -169,7 +179,8 @@ class Engine:
             self._emit("sys", f"gate  {kind} {name!r}  password-protected  status={status}")
         elif listing.password_ok:
             n = len(listing.children)
-            self._emit("ok", f"open  {kind} {name!r}  children={n}  public={listing.data.get('public')}")
+            public = listing.data.get("public")
+            self._emit("ok", f"open  {kind} {name!r}  children={n}  public={public}")
         else:
             self._emit(
                 "warn",
@@ -177,9 +188,12 @@ class Engine:
                 f"public={listing.data.get('public')}  expire={listing.data.get('expire')}",
             )
 
-    async def try_password(self, password: str, *, consume: Candidate | None = None) -> ListingResult | None:
-        from .wordlist import usable_password, sha256_hex
-
+    async def try_password(
+        self,
+        password: str,
+        *,
+        consume: Candidate | None = None,
+    ) -> ListingResult | None:
         if not usable_password(password):
             self._emit("warn", f"skip local  {password!r}  (GoFile passwords are 4–100 chars)")
             if consume:
@@ -220,7 +234,8 @@ class Engine:
             src = f"{consume.wordlist}:{consume.line}  " if consume else ""
             self._emit("fail", f"{src}{shown!r}  {listing.password_status or 'no-access'}")
         else:
-            self._emit("warn", f"unexpected  {listing.api_status}  status={listing.password_status}")
+            status = listing.password_status
+            self._emit("warn", f"unexpected  {listing.api_status}  status={status}")
         self._maybe_save()
         return listing
 
@@ -268,7 +283,8 @@ class Engine:
             self._emit("warn", "already running")
             return
         if self.session.found_password:
-            self._emit("ok", f"already unlocked with {self.session.found_password!r} — /dl to download")
+            found = self.session.found_password
+            self._emit("ok", f"already unlocked with {found!r} — /dl to download")
             return
         if not self.session.content_id:
             self._emit("err", "no target — /target <gofile url or id>")
@@ -384,7 +400,7 @@ class Engine:
                 await self.client.download_file(str(item["link"]), path)
                 saved.append(path)
                 self._emit("ok", f"saved {path}  ({item.get('size') or path.stat().st_size} bytes)")
-            except Exception as exc:
+            except (OSError, httpx.HTTPError, ValueError) as exc:
                 self._emit("err", f"download failed {name}: {exc}")
         self.session.save()
         return saved
